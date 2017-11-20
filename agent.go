@@ -13,12 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	grpc "google.golang.org/grpc"
 	"github.com/hashicorp/yamux"
 	"github.com/mdlayher/vsock"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/configs"
+	"github.com/sirupsen/logrus"
 )
 
 type process struct {
@@ -54,15 +56,39 @@ type pod struct {
 }
 
 const (
-	exitSuccess  = 0
-	exitFailure  = 1
-	fileMode0750 = 0750
+	agentName       = "kata-agent"
+	exitSuccess     = 0
+	exitFailure     = 1
+	fileMode0750    = 0750
+	defaultLogLevel = logrus.InfoLevel
 )
 
 const (
 	gRPCSockPath   = "/var/run/kata-containers/grpc.sock"
 	gRPCSockScheme = "unix"
 )
+
+var agentLog = logrus.WithFields(logrus.Fields{
+	"name": agentName,
+	"pid":  os.Getpid(),
+})
+
+// Version is the agent version. This variable is populated at build time.
+var Version = "unknown"
+
+func (p *pod) initLogger() error {
+	agentLog.Logger.Formatter = &logrus.JSONFormatter{TimestampFormat: time.RFC3339Nano}
+
+	config := newConfig(defaultLogLevel)
+	if err := config.getConfig(kernelCmdlineFile); err != nil {
+		agentLog.WithError(err).Warn("Failed to get config from kernel cmdline")
+	}
+	config.applyConfig()
+
+	agentLog.WithField("version", Version).Info()
+
+	return nil
+}
 
 func (p *pod) initChannel() error {
 	// Check for vsock support.
@@ -141,7 +167,7 @@ func (p *pod) loopYamux(session *yamux.Session, grpcConn net.Conn) {
 	for {
 		stream, err := session.Accept()
 		if err != nil {
-			fmt.Printf("%v\n", err)
+			agentLog.Error(err)
 			break
 		}
 		defer stream.Close()
@@ -213,7 +239,7 @@ func main() {
 
 	defer func() {
 		if err != nil {
-			fmt.Printf("%v\n", err)
+			agentLog.Error(err)
 			os.Exit(exitFailure)
 		}
 
@@ -224,6 +250,10 @@ func main() {
 	p := &pod{
 		containers: make(map[string]*container),
 		running:    false,
+	}
+
+	if err = p.initLogger(); err != nil {
+		return
 	}
 
 	// Check for vsock vs serial. This will fill the pod structure with
